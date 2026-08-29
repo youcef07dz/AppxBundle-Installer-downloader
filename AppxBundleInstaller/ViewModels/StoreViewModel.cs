@@ -42,8 +42,8 @@ public partial class StoreViewModel : ObservableObject
     
     public StoreViewModel()
     {
-        _httpClient = new HttpClient();
-        
+        _httpClient = CreateHttpClient();
+
         // Settings Sync
         IsAutoInstall = SettingsService.Instance.AutoInstall;
         SettingsService.Instance.PropertyChanged += (s, e) => 
@@ -53,6 +53,58 @@ public partial class StoreViewModel : ObservableObject
                 IsAutoInstall = SettingsService.Instance.AutoInstall;
             }
         };
+    }
+
+    private static HttpClient CreateHttpClient()
+    {
+        var handler = new HttpClientHandler
+        {
+            AllowAutoRedirect = true,
+            AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
+        };
+
+        var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(100)
+        };
+
+        // The rg-adguard Store API sits behind Cloudflare which rejects
+        // requests that do not look like they come from a real browser.
+        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://store.rg-adguard.net/");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://store.rg-adguard.net");
+
+        return client;
+    }
+
+    /// <summary>
+    /// Detects whether the rg-adguard API returned a Cloudflare challenge page
+    /// instead of actual results.
+    /// </summary>
+    private static bool IsCloudflareChallenge(string html)
+    {
+        return html.Contains("Just a moment", StringComparison.OrdinalIgnoreCase) ||
+               html.Contains("cf_chl", StringComparison.OrdinalIgnoreCase) ||
+               html.Contains("challenge-platform", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Cleans a raw filename extracted from HTML (decodes HTML entities and removes any embedded markup).
+    /// </summary>
+    private static string CleanFileName(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+
+        var value = System.Net.WebUtility.HtmlDecode(raw);
+
+        // Strip any remaining tags
+        value = Regex.Replace(value, @"<[^>]+>", string.Empty, RegexOptions.Singleline);
+
+        return value.Trim();
     }
 
     [RelayCommand]
@@ -83,6 +135,14 @@ public partial class StoreViewModel : ObservableObject
             response.EnsureSuccessStatusCode();
 
             var html = await response.Content.ReadAsStringAsync();
+
+            if (IsCloudflareChallenge(html))
+            {
+                StatusMessage = "The Store service is protected and blocked the request. Please try again later.";
+                DiagnosticsService.Instance.Log(LogLevel.Error, "Store search blocked by Cloudflare challenge", "The rg-adguard service returned a challenge page. Retrying may help.");
+                return;
+            }
+
             ParseResults(html);
 
             var msg = StoreItems.Count > 0 ? $"Found {StoreItems.Count} items." : "No items found.";
@@ -127,10 +187,10 @@ public partial class StoreViewModel : ObservableObject
 
             var item = new StoreItem
             {
-                Name = name,
+                Name = CleanFileName(name),
                 DownloadUrl = url,
-                Expiration = expire,
-                FileSize = size
+                Expiration = CleanFileName(expire),
+                FileSize = CleanFileName(size)
             };
 
             StoreItems.Add(item);
@@ -154,19 +214,36 @@ public partial class StoreViewModel : ObservableObject
                 Directory.CreateDirectory(downloadFolder);
             }
 
-            string fileName = item.Name;
+            string fileName = CleanFileName(item.Name);
             foreach(char c in Path.GetInvalidFileNameChars())
             {
                 fileName = fileName.Replace(c, '_');
             }
+            fileName = fileName.Trim();
+
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                fileName = Guid.NewGuid().ToString("N");
+            }
             
             string filePath = Path.Combine(downloadFolder, fileName);
-            
-            // Overwrite if exists
-            using (var stream = await _httpClient.GetStreamAsync(item.DownloadUrl))
-            using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
+
+            using (var request = new HttpRequestMessage(HttpMethod.Get, item.DownloadUrl))
             {
-                await stream.CopyToAsync(fileStream);
+                request.Headers.TryAddWithoutValidation("User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                request.Headers.TryAddWithoutValidation("Accept", "*/*");
+
+                using (var stream = await _httpClient.SendAsync(request).ConfigureAwait(false))
+                {
+                    stream.EnsureSuccessStatusCode();
+
+                    using (var contentStream = await stream.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                    using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        await contentStream.CopyToAsync(fileStream).ConfigureAwait(false);
+                    }
+                }
             }
 
             if (!File.Exists(filePath)) throw new FileNotFoundException("File not found after download", filePath);
